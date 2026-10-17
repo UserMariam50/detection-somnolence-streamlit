@@ -23,14 +23,11 @@
 - [Fonctionnalités](#-fonctionnalités)
 - [Captures d'écran](#-captures-décran)
 - [Architecture](#-architecture)
-- [Stack technique](#-stack-technique)
-- [Installation](#-installation)
 - [Utilisation](#-utilisation)
 - [Modèle](#-modèle)
 - [Métriques](#-métriques)
 - [Limites](#-limites)
 - [Avertissement](#-avertissement)
-- [Licence](#-licence)
 - [Auteur](#-auteur)
 
 ---
@@ -93,6 +90,73 @@ L'application propose deux modes d'analyse : **vidéo enregistrée** et **webcam
 
 ---
 
+## 💻 Utilisation
+
+*Mode vidéo enregistrée
+Sélectionner « Vidéo enregistrée ».
+
+Importer une vidéo (MP4, AVI, MOV, MKV).
+
+Cliquer sur « Analyser la vidéo ».
+
+Consulter l'aperçu en direct, puis les résultats :
+
+Vidéo annotée
+
+KPI (EAR, seuil, PERCLOS, fermetures, état)
+
+Graphique d'évolution
+
+Journal des fermetures prolongées
+
+Tableau image par image
+
+Boutons d'export CSV
+
+*Mode webcam en direct
+Sélectionner « Webcam en direct ».
+
+Autoriser l'accès à la caméra dans le navigateur.
+
+Garder le visage face à la caméra pendant la calibration (2 s).
+
+Consulter les métriques en temps réel.
+
+Cliquer sur « Analyser la session webcam » pour récupérer les mesures et événements.
+
+---
+
+## 🧠 Modèle
+Le fichier face_landmarker.task est un modèle binaire MediaPipe (quelques Mo). Il n'est pas versionné dans ce dépôt (voir .gitignore) pour éviter de gonfler l'historique Git.
+Téléchargez le modèle depuis le dépôt officiel MediaPipe.
+Placez ensuite le fichier face_landmarker.task à la racine du projet, au même niveau que app.py.
+
+---
+
+## 📐 Métriques
+EAR — Eye Aspect Ratio
+L'EAR mesure l'ouverture des yeux à partir de 6 points par œil :
+
+
+EAR = (|p2 - p6| + |p3 - p5|) / (2 × |p1 - p4|)
+
+EAR élevé → yeux ouverts
+EAR bas → yeux fermés ou mi-clos
+
+PERCLOS — Percentage of Eye Closure
+Le PERCLOS mesure le pourcentage de temps où les yeux sont fermés sur une fenêtre glissante (60 s par défaut) :
+
+PERCLOS = (durée yeux fermés ≥ 0,5 s) / (durée totale valide) × 100
+Les clignotements (< 0,5 s) sont exclus du calcul.
+
+Le PERCLOS n'est publié qu'après une fenêtre complète de 60 s, avec au moins 75 % de couverture valide.
+
+Calibration baseline
+Pendant les 2 premières secondes, l'application accumule des mesures d'yeux ouverts.
+
+Le seuil est ensuite calculé comme : seuil = médiane(baseline) × 0,75.
+
+Si la baseline est jugée incertaine (médiane < 0,15), le seuil de secours 0,15 est utilisé.
 
 ---
 
@@ -123,3 +187,50 @@ detection-somnolence-conducteur/
 ├── face_landmarker.task # Modèle MediaPipe (non versionné)
 │
 └── docs/ # Captures d'écran et documentation
+
+---
+##⚠️ Limites
+Limite	Détail
+Prototype académique	: Aucune validation clinique ou réglementaire.
+Seuil PERCLOS expérimental	: Le seuil de 15 % est indicatif et doit être validé sur des données annotées.
+Sensibilité aux conditions	: Éclairage, lunettes, angle du visage, résolution.
+Pas de validation quantitative	: Aucun dataset annoté n'a été utilisé pour mesurer précision/rappel.
+Head pose non géré	: Un regard détourné peut fausser l'EAR.
+Pas de détection multi-visages	: Le système ne traite qu'un visage à la fois.
+
+---
+##🚨 Avertissement
+Ce système n'est pas un dispositif de sécurité.
+
+Il ne remplace en aucun cas les équipements de sécurité automobile, ni le jugement du conducteur.
+
+Il est destiné exclusivement à :
+
+la recherche académique,
+
+l'enseignement,
+
+la démonstration technique.
+
+Ne l'utilisez pas pour surveiller un conducteur réel sans son consentement éclairé.
+
+---
+##👤 Auteur
+Nakbi Meriem
+GitHub :UserMariam50
+
+
+##🙏 Remerciements
+MediaPipe — Google
+
+OpenCV
+
+Streamlit
+
+streamlit-webrtc
+
+
+<div align="center">
+⭐ Si ce projet vous a été utile, n'hésitez pas à lui donner une étoile ! ⭐
+
+</div> ```
