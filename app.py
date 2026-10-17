@@ -33,7 +33,9 @@ PERCLOS_ALERT = 15.0
 # Calibration courte adaptée aux vidéos courtes
 CALIBRATION_MIN_SECONDS = 0.5
 CALIBRATION_MAX_SECONDS = 2.0
-CALIBRATION_MIN_SAMPLES = 5
+CALIBRATION_MIN_SAMPLES = 12
+CALIBRATION_OPEN_EAR_MIN = INITIAL_THRESHOLD * 1.20
+PERCLOS_MIN_VALID_COVERAGE = 0.75
 
 # Seuil de validité de la baseline : en dessous, on
 # considère que la calibration a appris des yeux mi-clos
@@ -121,6 +123,8 @@ class DrowsinessDetector:
 
         self.ear_history = deque(maxlen=5)
         self.baseline_samples = deque(maxlen=300)
+        self.calibration_uncertain = False
+        self.last_baseline_update = None
         self.baseline_start = None
         self.session_start = None
 
@@ -146,60 +150,37 @@ class DrowsinessDetector:
 
     # -----------------------------------------------------
     def threshold(self):
-        if len(self.baseline_samples) >= 3:
+        # La baseline n'est utilisée que si suffisamment de mesures
+        # plausibles d'yeux ouverts ont été recueillies.
+        if self.calibration_ready():
             median_ear = float(np.median(self.baseline_samples))
-
-            # Correction 1 : baseline suspecte → seuil initial
-            if median_ear < MIN_VALID_BASELINE:
-                return INITIAL_THRESHOLD
-
-            return max(0.05, median_ear * BASELINE_FACTOR)
+            if median_ear >= MIN_VALID_BASELINE:
+                return max(0.05, median_ear * BASELINE_FACTOR)
         return INITIAL_THRESHOLD
 
     def calibration_ready(self):
-        return len(self.baseline_samples) >= CALIBRATION_MIN_SAMPLES
+        if len(self.baseline_samples) < CALIBRATION_MIN_SAMPLES:
+            return False
+        median_ear = float(np.median(self.baseline_samples))
+        return np.isfinite(median_ear) and median_ear >= MIN_VALID_BASELINE
 
     def in_calibration_phase(self):
         if self.session_start is None or self.last_time is None:
             return True
-
         elapsed = self.last_time - self.session_start
-
         if elapsed < CALIBRATION_MIN_SECONDS:
             return True
-
         if self.calibration_ready():
             return False
-
-        if elapsed >= CALIBRATION_MAX_SECONDS:
-            return False
-
-        return True
+        return elapsed < CALIBRATION_MAX_SECONDS
 
     def _apply_fallback_baseline_if_needed(self):
-        if self._fallback_applied:
-            return
-        if self.calibration_ready():
-            return
+        # Ne jamais fabriquer une baseline en dupliquant des valeurs
+        # récentes : ces valeurs pourraient correspondre à des yeux fermés.
         if self.last_time is None or self.session_start is None:
             return
-        if (
-            self.last_time - self.session_start
-            < CALIBRATION_MAX_SECONDS
-        ):
-            return
-
-        valid_ears = [
-            e for e in self.ear_history
-            if e is not None and np.isfinite(e)
-        ]
-        if valid_ears:
-            for _ in range(CALIBRATION_MIN_SAMPLES):
-                self.baseline_samples.append(
-                    float(np.median(valid_ears))
-                )
-
-        self._fallback_applied = True
+        if self.last_time - self.session_start >= CALIBRATION_MAX_SECONDS:
+            self.calibration_uncertain = not self.calibration_ready()
 
     # -----------------------------------------------------
     def _reset_temporal_counters(self):
@@ -253,6 +234,7 @@ class DrowsinessDetector:
             self.last_face_valid = False
             self.last_status = "FACE NOT DETECTED"
             self._prune_samples(timestamp_sec)
+            self.last_perclos = self.perclos()
 
             self._draw_overlay(
                 frame, width, height,
@@ -284,6 +266,7 @@ class DrowsinessDetector:
             self.last_face_valid = False
             self.last_status = "FACE TOO SMALL"
             self._prune_samples(timestamp_sec)
+            self.last_perclos = self.perclos()
 
             self._draw_overlay(
                 frame, width, height,
@@ -298,6 +281,12 @@ class DrowsinessDetector:
         right_ear = calculate_ear(landmarks, RIGHT_EYE)
 
         if not np.isfinite([left_ear, right_ear]).all():
+            self.samples.append({
+                "t": timestamp_sec, "dt": dt,
+                "valid": False, "prolonged": False,
+            })
+            self._prune_samples(timestamp_sec)
+            self.last_perclos = self.perclos()
             self.last_status = "MEASUREMENT UNCERTAIN"
             self.last_eye_state = "UNKNOWN"
             self.last_face_valid = False
@@ -323,15 +312,39 @@ class DrowsinessDetector:
         in_calib = self.in_calibration_phase()
 
         if in_calib:
-            if self.baseline_start is None:
-                self.baseline_start = timestamp_sec
-            self.baseline_samples.append(ear)
-        elif self.closed_since is None:
-            old_threshold = self.threshold()
-            if ear >= old_threshold * 1.20:
+            # Écarter les valeurs trop basses, probablement liées à une
+            # fermeture ou à une ouverture incomplète des yeux.
+            if ear >= CALIBRATION_OPEN_EAR_MIN:
                 if self.baseline_start is None:
                     self.baseline_start = timestamp_sec
                 self.baseline_samples.append(ear)
+        else:
+            # Adaptation très prudente : une mesure n'est ajoutée qu'après
+            # confirmation d'yeux ouverts, avec une marge au-dessus du seuil,
+            # et au maximum une fois par seconde.
+            old_threshold = self.threshold()
+            baseline_median = (
+                float(np.median(self.baseline_samples))
+                if self.baseline_samples else None
+            )
+            plausibly_open = ear >= max(
+                CALIBRATION_OPEN_EAR_MIN, old_threshold * 1.25
+            )
+            not_an_outlier = (
+                baseline_median is None
+                or ear <= baseline_median * 1.35
+            )
+            if (
+                (self.last_eye_state == "OPEN" or not self.calibration_ready())
+                and plausibly_open
+                and not_an_outlier
+                and (self.last_baseline_update is None
+                     or timestamp_sec - self.last_baseline_update >= 1.0)
+            ):
+                # Si la calibration initiale était incertaine, ces mesures
+                # peuvent permettre de la récupérer pendant la session.
+                self.baseline_samples.append(ear)
+                self.last_baseline_update = timestamp_sec
 
         self._apply_fallback_baseline_if_needed()
         self.last_threshold = self.threshold()
@@ -342,16 +355,14 @@ class DrowsinessDetector:
             self.last_eye_state = "UNKNOWN"
             self._reset_temporal_counters()
             self.samples.append({
-                "t": timestamp_sec,
-                "dt": dt,
-                "valid": True,
-                "prolonged": False,
+                "t": timestamp_sec, "dt": dt,
+                "valid": True, "prolonged": False,
             })
             self._prune_samples(timestamp_sec)
-
+            self.last_perclos = self.perclos()
             self._draw_overlay(
                 frame, width, height,
-                status="CALIBRATING",
+                status="CALIBRATING (KEEP EYES OPEN)",
                 color=(255, 200, 0),
                 face_box=self._face_box(landmarks, width, height),
             )
@@ -541,11 +552,13 @@ class DrowsinessDetector:
             (20, height - 50),
             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
         )
+        _, valid_seconds, coverage = self.perclos_details()
         cv2.putText(
             frame,
-            f"PERCLOS ({PERCLOS_WINDOW_SECONDS}s): {perclos_text}",
+            f"PERCLOS {PERCLOS_WINDOW_SECONDS}s: {perclos_text} "
+            f"| couverture: {coverage:.0f}%",
             (20, height - 20),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
+            cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 2
         )
 
     # -----------------------------------------------------
@@ -554,29 +567,50 @@ class DrowsinessDetector:
         while self.samples and self.samples[0]["t"] < cutoff:
             self.samples.popleft()
 
-    def perclos(self):
-        valid_duration = sum(
-            s["dt"] for s in self.samples if s["valid"]
-        )
+    def perclos_details(self):
+        """Retourne PERCLOS et couverture de la fenêtre glissante.
+
+        PERCLOS n'est publié qu'après une fenêtre complète de 60 s et si
+        au moins 75 % de cette fenêtre contient des mesures valides.
+        """
+        if not self.samples or self.last_time is None:
+            return None, 0.0, 0.0
+
+        window_start = self.last_time - PERCLOS_WINDOW_SECONDS
+        window_samples = [s for s in self.samples if s["t"] >= window_start]
+        valid_duration = sum(s["dt"] for s in window_samples if s["valid"])
         closed_duration = sum(
-            s["dt"] for s in self.samples
+            s["dt"] for s in window_samples
             if s["valid"] and s["prolonged"]
         )
+        elapsed = self.last_time - (self.session_start if self.session_start is not None else self.last_time)
+        coverage = min(100.0, 100.0 * valid_duration / PERCLOS_WINDOW_SECONDS)
 
-        if valid_duration < 5:
-            return None
+        if elapsed < PERCLOS_WINDOW_SECONDS:
+            return None, valid_duration, coverage
+        if valid_duration < PERCLOS_WINDOW_SECONDS * PERCLOS_MIN_VALID_COVERAGE:
+            return None, valid_duration, coverage
 
-        return 100 * closed_duration / valid_duration
+        return 100.0 * closed_duration / valid_duration, valid_duration, coverage
+
+    def perclos(self):
+        value, _, _ = self.perclos_details()
+        return value
 
     def snapshot(self):
         # On expose le nombre d'événements "publics"
         public_count = len(_public_events(self.events))
+        perclos_value, perclos_valid_seconds, perclos_coverage = self.perclos_details()
         return {
             "EAR": self.last_ear,
             "EAR gauche": self.last_left_ear,
             "EAR droit": self.last_right_ear,
             "Seuil": self.last_threshold,
-            "PERCLOS": self.last_perclos,
+            "PERCLOS": perclos_value,
+            "Couverture PERCLOS (%)": round(perclos_coverage, 1),
+            "Mesures valides PERCLOS (s)": round(perclos_valid_seconds, 1),
+            "Calibration": ("Suffisante" if self.calibration_ready() else
+                            ("Incertaine" if self.calibration_uncertain else "En cours")),
             "État": self.last_status,
             "Etat des yeux": self.last_eye_state,
             "Calibration suffisante": self.calibration_ready(),
@@ -668,6 +702,9 @@ def analyze_video(video_bytes, extension, preview_placeholder):
                 "EAR": metrics["EAR"],
                 "Seuil": metrics["Seuil"],
                 "PERCLOS": metrics["PERCLOS"],
+                "Couverture PERCLOS (%)": metrics["Couverture PERCLOS (%)"],
+                "Mesures valides PERCLOS (s)": metrics["Mesures valides PERCLOS (s)"],
+                "Calibration": metrics["Calibration"],
                 "Etat des yeux": metrics["Etat des yeux"],
                 "État": metrics["État"],
                 "Fermetures prolongées": metrics[
@@ -819,6 +856,9 @@ class LiveProcessor(VideoProcessorBase):
             "EAR": metrics["EAR"],
             "Seuil": metrics["Seuil"],
             "PERCLOS": metrics["PERCLOS"],
+            "Couverture PERCLOS (%)": metrics["Couverture PERCLOS (%)"],
+            "Mesures valides PERCLOS (s)": metrics["Mesures valides PERCLOS (s)"],
+            "Calibration": metrics["Calibration"],
             "Etat des yeux": metrics["Etat des yeux"],
             "État": metrics["État"],
             "Fermetures prolongées": metrics[
@@ -895,7 +935,12 @@ st.set_page_config(
 
 st.title("🚗 Driver Drowsiness Detection")
 st.caption(
-    "EAR adaptatif • PERCLOS glissant • Analyse vidéo et webcam"
+    "EAR personnalisé • PERCLOS glissant sur 60 s avec couverture "
+    "affichée • Analyse vidéo et webcam"
+)
+st.warning(
+    "Prototype académique uniquement. Ne l'utilise pas comme dispositif "
+    "de sécurité pendant la conduite réelle. Le seuil PERCLOS est expérimental."
 )
 
 if not os.path.exists(MODEL_PATH):
@@ -952,16 +997,12 @@ if mode == "Vidéo enregistrée":
 
                 # Correction 4 : diagnostic calibration
                 seuil_final = latest["Seuil"]
-                if pd.notna(seuil_final) and (
-                    seuil_final < MIN_VALID_BASELINE * BASELINE_FACTOR
-                ):
+                if latest.get("Calibration", "Incertaine") != "Suffisante":
                     st.warning(
-                        "La calibration a produit un seuil très bas "
-                        f"({seuil_final:.3f}). Il est possible que "
-                        "la personne ait eu les yeux mi-clos pendant "
-                        "la calibration, ou que la détection soit "
-                        "biaisée (profil, lunettes, résolution). "
-                        "Vérifiez la vidéo annotée."
+                        "Calibration incertaine : nombre insuffisant de mesures "
+                        "plausibles d'yeux ouverts. Le détecteur utilise le seuil "
+                        f"de secours fixe ({INITIAL_THRESHOLD:.2f}). Vérifiez la "
+                        "vidéo et la qualité de détection."
                     )
 
                 k1, k2, k3, k4, k5 = st.columns(5)
@@ -1000,6 +1041,12 @@ if mode == "Vidéo enregistrée":
                     "État final",
                     str(latest["État"]),
                 )
+                st.caption(
+                    f"Calibration : {latest.get('Calibration', 'Inconnue')} · "
+                    f"Couverture PERCLOS : "
+                    f"{latest.get('Couverture PERCLOS (%)', 0):.1f}% "
+                    f"({latest.get('Mesures valides PERCLOS (s)', 0):.1f} s valides)"
+                )
 
                 if (
                     pd.notna(latest["PERCLOS"])
@@ -1007,7 +1054,7 @@ if mode == "Vidéo enregistrée":
                 ):
                     st.warning(
                         f"PERCLOS ≥ {PERCLOS_ALERT}% : "
-                        "indice de somnolence élevé."
+                        "indice expérimental de somnolence élevé (à valider sur des données annotées)."
                     )
 
                 st.subheader("Évolution de l'EAR")
@@ -1118,10 +1165,20 @@ else:
             str(snapshot["État"]),
         )
 
-        if snapshot["Calibration suffisante"]:
-            st.success("Calibration suffisante.")
+        if snapshot["Calibration"] == "Suffisante":
+            st.success("Calibration suffisante : baseline calculée à partir d'yeux plausiblement ouverts.")
+        elif snapshot["Calibration"] == "Incertaine":
+            st.warning(
+                f"Calibration incertaine : seuil fixe {INITIAL_THRESHOLD:.2f} utilisé. "
+                "Regarde la caméra avec les yeux ouverts et un visage bien éclairé."
+            )
         else:
-            st.warning("Calibration en cours...")
+            st.info("Calibration en cours : garde le visage face à la caméra et les yeux ouverts.")
+        st.caption(
+            f"Couverture PERCLOS : {snapshot['Couverture PERCLOS (%)']:.1f}% "
+            f"({snapshot['Mesures valides PERCLOS (s)']:.1f} s valides sur 60 s). "
+            "Le PERCLOS reste indisponible tant que la fenêtre n'est pas suffisamment complète."
+        )
 
         live_rows = ctx.video_processor.get_rows()
         if live_rows:
@@ -1209,6 +1266,11 @@ else:
                 "Fermetures prolongées",
                 str(latest["Fermetures prolongées (texte)"]),
             )
+            st.caption(
+                f"Calibration : {latest.get('Calibration', 'Inconnue')} · "
+                f"Couverture PERCLOS : {latest.get('Couverture PERCLOS (%)', 0):.1f}% "
+                f"({latest.get('Mesures valides PERCLOS (s)', 0):.1f} s valides)"
+            )
 
             if (
                 pd.notna(latest["PERCLOS"])
@@ -1216,7 +1278,7 @@ else:
             ):
                 st.warning(
                     f"PERCLOS ≥ {PERCLOS_ALERT}% : "
-                    "indice de somnolence élevé."
+                    "indice expérimental de somnolence élevé (à valider sur des données annotées)."
                 )
 
             st.subheader("Évolution de l'EAR (webcam)")
