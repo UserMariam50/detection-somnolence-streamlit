@@ -90,6 +90,22 @@ L'application propose deux modes d'analyse : **vidéo enregistrée** et **webcam
 
 ---
 
+
+## 🏗️ Architecture
+
+detection-somnolence-conducteur/
+│
+├── app.py # Application principale
+├── requirements.txt # Dépendances Python
+├── .gitignore # Fichiers ignorés par Git
+├── README.md # Ce fichier
+│
+├── face_landmarker.task # Modèle MediaPipe (non versionné)
+│
+└── docs/ # Captures d'écran et documentation
+
+---
+
 ## 💻 Utilisation
 
 *Mode vidéo enregistrée
@@ -175,20 +191,7 @@ Si la baseline est jugée incertaine (médiane < 0,15), le seuil de secours 0,15
 | **imageio-ffmpeg** | Conversion H.264 des vidéos annotées |
 
 ---
-## 🏗️ Architecture
 
-detection-somnolence-conducteur/
-│
-├── app.py # Application principale
-├── requirements.txt # Dépendances Python
-├── .gitignore # Fichiers ignorés par Git
-├── README.md # Ce fichier
-│
-├── face_landmarker.task # Modèle MediaPipe (non versionné)
-│
-└── docs/ # Captures d'écran et documentation
-
----
 ##⚠️ Limites
 Limite	Détail
 Prototype académique	: Aucune validation clinique ou réglementaire.
@@ -199,6 +202,7 @@ Head pose non géré	: Un regard détourné peut fausser l'EAR.
 Pas de détection multi-visages	: Le système ne traite qu'un visage à la fois.
 
 ---
+
 ##🚨 Avertissement
 Ce système n'est pas un dispositif de sécurité.
 
@@ -215,6 +219,7 @@ la démonstration technique.
 Ne l'utilisez pas pour surveiller un conducteur réel sans son consentement éclairé.
 
 ---
+
 ##👤 Auteur
 Nakbi Meriem
 GitHub :UserMariam50
